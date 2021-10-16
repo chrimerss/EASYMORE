@@ -6,6 +6,7 @@ import netCDF4      as nc4
 import numpy        as np
 import pandas       as pd
 import xarray       as xr
+import dask
 import sys
 import os
 import warnings
@@ -45,9 +46,11 @@ class easymore:
         self.license                   =  '' # data license
         self.tolerance                 =  10**-5 # tolerance
         self.save_csv                  =  False # save csv
+        self.save_shp                  =  False
+        self.ncpus                     =  8 #number of cpus for dask
         self.sort_ID                   =  False # to sort the remapped based on the target shapfile ID; self.target_shp_ID should be given
         self.complevel                 =  4 # netcdf compression level from 1 to 9. Any other value or object will mean no compression.
-        self.version                   =  '0.0.2' # version of the easymore
+        self.version                   =  '0.0.3' # version of the easymore
         print('EASYMORE version '+self.version+ ' is initiated.')
 
     ##############################################################
@@ -69,12 +72,13 @@ class easymore:
         if self.remap_csv == '':
             import geopandas as gpd
             # check the target shapefile
-            target_shp_gpd = gpd.read_file(self.target_shp)
+            target_shp_gpd = gpd.read_file(self.target_shp).set_crs('epsg:4326')
             target_shp_gpd = self.check_target_shp(target_shp_gpd)
             # save the standard target shapefile
-            print('EASYMORE will save standard shapefile for EASYMORE claculation as:')
-            print(self.temp_dir+self.case_name+'_target_shapefile.shp')
-            target_shp_gpd.to_file(self.temp_dir+self.case_name+'_target_shapefile.shp') # save
+            if self.save_shp:
+                print('EASYMORE will save standard shapefile for EASYMORE claculation as:')
+                print(self.temp_dir+self.case_name+'_target_shapefile.shp')
+                target_shp_gpd.to_file(self.temp_dir+self.case_name+'_target_shapefile.shp') # save
             # check the source NetCDF files
             self.check_source_nc()
             # find the case
@@ -83,58 +87,66 @@ class easymore:
             if (self.case == 1 or self.case == 2)  and (self.source_shp == ''):
                 if self.case == 1:
                     if hasattr(self, 'lat_expanded') and hasattr(self, 'lon_expanded'):
-                        self.lat_lon_SHP(self.lat_expanded, self.lon_expanded,\
+                        source_shp_gpd= self.lat_lon_SHP(self.lat_expanded, self.lon_expanded,\
                             self.temp_dir+self.case_name+'_source_shapefile.shp')
                     else:
-                        self.lat_lon_SHP(self.lat, self.lon,\
+                        source_shp_gpd= self.lat_lon_SHP(self.lat, self.lon,\
                             self.temp_dir+self.case_name+'_source_shapefile.shp')
                 else:
-                    self.lat_lon_SHP(self.lat, self.lon,\
+                    source_shp_gpd= self.lat_lon_SHP(self.lat, self.lon,\
                         self.temp_dir+self.case_name+'_source_shapefile.shp')
-                print('EASYMORE is creating the shapefile from the netCDF file and saving it here:')
-                print(self.temp_dir+self.case_name+'_source_shapefile.shp')
+                if self.save_shp:
+                    print('EASYMORE is creating the shapefile from the netCDF file and saving it here:')
+                    print(self.temp_dir+self.case_name+'_source_shapefile.shp')
             if (self.case == 1 or self.case == 2)  and (self.source_shp != ''):
-                source_shp_gpd = gpd.read_file(self.source_shp)
+                # source_shp_gpd = gpd.read_file(self.source_shp)
                 source_shp_gpd = self.add_lat_lon_source_SHP(source_shp_gpd, self.source_shp_lat,\
                     self.source_shp_lon, self.source_shp_ID)
-                source_shp_gpd.to_file(self.temp_dir+self.case_name+'_source_shapefile.shp')
-                print('EASYMORE detect the shapefile is provided and will resave it here:')
-                print(self.temp_dir+self.case_name+'_source_shapefile.shp')
+                if self.save_shp:
+                    source_shp_gpd.to_file(self.temp_dir+self.case_name+'_source_shapefile.shp')
+                    print('EASYMORE detect the shapefile is provided and will resave it here:')
+                    print(self.temp_dir+self.case_name+'_source_shapefile.shp')
             # if case 3 or source shapefile is provided
             if (self.case == 3) and (self.source_shp != ''):
                 self.check_source_nc_shp() # check the lat lon in soure shapefile and nc file
-                source_shp_gpd = gpd.read_file(self.source_shp)
+                # source_shp_gpd = gpd.read_file(self.source_shp)
                 source_shp_gpd = self.add_lat_lon_source_SHP(source_shp_gpd, self.source_shp_lat,\
                     self.source_shp_lon, self.source_shp_ID)
-                source_shp_gpd.to_file(self.temp_dir+self.case_name+'_source_shapefile.shp')
-                print('EASYMORE is creating the shapefile from the netCDF file and saving it here:')
-                print(self.temp_dir+self.case_name+'_source_shapefile.shp')
+                if self.save_shp:
+                    source_shp_gpd.to_file(self.temp_dir+self.case_name+'_source_shapefile.shp')
+                    print('EASYMORE is creating the shapefile from the netCDF file and saving it here:')
+                    print(self.temp_dir+self.case_name+'_source_shapefile.shp')
             # intersection of the source and sink/target shapefile
-            shp_1 = gpd.read_file(self.temp_dir+self.case_name+'_target_shapefile.shp')
-            shp_2 = gpd.read_file(self.temp_dir+self.case_name+'_source_shapefile.shp')
+            shp_1 = target_shp_gpd.set_crs('epsg:4326')
+            shp_2 = source_shp_gpd.set_crs('epsg:4326')
             # correction of the source and target shapefile to frame of -180 to 180
-            shp_1 = self.shp_lon_correction(shp_1)
-            shp_2 = self.shp_lon_correction(shp_2)
-            shp_1.to_file(self.temp_dir+self.case_name+'_target_shapefile_corrected_frame.shp')
-            shp_2.to_file(self.temp_dir+self.case_name+'_source_shapefile_corrected_frame.shp')
+            # I think we assume EPSG:4326, so no need for correction
+            # shp_1 = self.shp_lon_correction(shp_1)
+            # shp_2 = self.shp_lon_correction(shp_2)
+            if self.save_shp:
+                shp_1.to_file(self.temp_dir+self.case_name+'_target_shapefile_corrected_frame.shp')
+                shp_2.to_file(self.temp_dir+self.case_name+'_source_shapefile_corrected_frame.shp')
             # reprojections to equal area
             if (str(shp_1.crs).lower() == str(shp_2.crs).lower()) and ('epsg:4326' in str(shp_1.crs).lower()):
                 shp_1 = shp_1.to_crs ("EPSG:6933") # project to equal area
-                shp_1.to_file(self.temp_dir+self.case_name+'test.shp')
-                shp_1 = gpd.read_file(self.temp_dir+self.case_name+'test.shp')
+                if self.save_shp:
+                    shp_1.to_file(self.temp_dir+self.case_name+'test.shp')
+                    # shp_1 = gpd.read_file(self.temp_dir+self.case_name+'test.shp')
                 shp_2 = shp_2.to_crs ("EPSG:6933") # project to equal area
-                shp_2.to_file(self.temp_dir+self.case_name+'test.shp')
-                shp_2 = gpd.read_file(self.temp_dir+self.case_name+'test.shp')
+                if self.save_shp:
+                    shp_2.to_file(self.temp_dir+self.case_name+'test.shp')
+                    # shp_2 = gpd.read_file(self.temp_dir+self.case_name+'test.shp')
                 # remove test files
                 removeThese = glob.glob(self.temp_dir+self.case_name+'test.*')
                 for file in removeThese:
                     os.remove(file)
             else:
                 sys.exit('The projection for source and target shapefile are not WGS84, please revise, assign')
-            shp_int = self.intersection_shp(shp_1, shp_2)
+            shp_int = self.intersection_shp(shp_1, shp_2) # this is imperative for large dataset; try to use dask instead.
             shp_int = shp_int.sort_values(by=['S_1_ID_t']) # sort based on ID_t
             shp_int = shp_int.to_crs ("EPSG:4326") # project back to WGS84
-            shp_int.to_file(self.temp_dir+self.case_name+'_intersected_shapefile.shp') # save the intersected files
+            if self.save_shp:
+                shp_int.to_file(self.temp_dir+self.case_name+'_intersected_shapefile.shp') # save the intersected files
             shp_int = shp_int.drop(columns=['geometry']) # remove the geometry
             # rename dictionary
             dict_rename = {'S_1_ID_t' : 'ID_t',
@@ -147,9 +159,10 @@ class easymore:
                            'AP1N'     : 'weight'}
             shp_int = shp_int.rename(columns=dict_rename) # rename fields for remapping file
             shp_int = pd.DataFrame(shp_int) # move to data set and save as a csv
-            shp_int.to_csv(self.temp_dir+self.case_name+'_intersected_shapefile.csv') # save the intersected files
+            # shp_int.to_csv(self.temp_dir+self.case_name+'_intersected_shapefile.csv') # save the intersected files
             # create the remap file if remap file
-            int_df = pd.read_csv (self.temp_dir+self.case_name+'_intersected_shapefile.csv')
+            # int_df = pd.read_csv (self.temp_dir+self.case_name+'_intersected_shapefile.csv')
+            int_df= shp_int.copy()
             lat_source = self.lat
             lon_source = self.lon
             int_df = self.create_remap(int_df, lat_source, lon_source)
@@ -630,24 +643,25 @@ in dimensions of the varibales and latitude and longitude')
         # check if lat/lon that are taken in has the same dimension
         import geopandas as gpd
         from   shapely.geometry import Polygon
-        import shapefile # pyshed library
-        import shapely
+        from numba import jit
+        # import shapefile # pyshed library
+        # import shapely
         #
         lat_lon_shape = lat.shape
         # write the shapefile
-        with shapefile.Writer(file_name) as w:
-            w.autoBalance = 1 # turn on function that keeps file stable if number of shapes and records don't line up
-            w.field("ID_s",'N') # create (N)umerical attribute fields, integer
-            w.field("lat_s",'F',decimal=4) # float with 4 decimals
-            w.field("lon_s",'F',decimal=4) # float with 4 decimals
-            # preparing the m whcih is a couter for the shapefile arbitrary ID
-            m = 0.00
-            # itterating to create the shapes of the result shapefile ignoring the first and last rows and columns
+        @jit(nopython=True)
+        def bottleneck(lat: np.ndarray, lon: np.ndarray) -> tuple:
+            '''
+            replace two for-loop with C++
+            '''
+            lat_lon_shape= lon.shape
+            geometry = []
+            records= []
+            m=0
             for i in range(1, lat_lon_shape[0] - 1):
                 for j in range(1, lat_lon_shape[1] - 1):
                     # checking is lat and lon is located inside the provided bo
                     # empty the polygon variable
-                    parts = []
                     # update records
                     m += 1 # ID
                     center_lat = lat[i,j] # lat value of data point in source .nc file
@@ -670,8 +684,7 @@ in dimensions of the varibales and latitude and longitude')
                     Lon_LowLeft  = (lon[i, j - 1] + lon[i + 1, j - 1] + lon[i + 1, j] + lon[i, j]) / 4
                     Lon_Left     = (lon[i, j - 1] + lon[i, j]) / 2
                     Lon_UpLeft   = (lon[i - 1, j - 1] + lon[i - 1, j] + lon[i, j - 1] + lon[i, j]) / 4
-                    # creating the polygon given the lat and lon
-                    parts.append([ (Lon_Up,        Lat_Up),\
+                    geometry.append([ (Lon_Up,        Lat_Up),\
                                    (Lon_UpRright,  Lat_UpRright), \
                                    (Lon_Right,     Lat_Right), \
                                    (Lon_LowRight,  Lat_LowRight), \
@@ -680,10 +693,70 @@ in dimensions of the varibales and latitude and longitude')
                                    (Lon_Left,      Lat_Left), \
                                    (Lon_UpLeft,    Lat_UpLeft), \
                                    (Lon_Up,        Lat_Up)])
-                    # store polygon
-                    w.poly(parts)
-                    # update records/fields for the polygon
-                    w.record(m, center_lat, center_lon)
+                    records.append([m, center_lat, center_lon])
+
+            return (geometry, records)
+
+        geometry, records= bottleneck(lat, lon)
+        records= np.stack(records)
+        gdf= gpd.GeoDataFrame(geometry=[Polygon(_geom) for _geom in geometry])
+        gdf['ID_s']= records[:,0].astype(np.int32)
+        gdf['lat_s']= records[:,1].astype(np.float32)
+        gdf['lon_s']= records[:,2].astype(np.float32)
+        if self.save_shp:
+            gdf.to_file(file_name)
+
+        return gdf
+
+        # with shapefile.Writer(file_name) as w:
+        #     w.autoBalance = 1 # turn on function that keeps file stable if number of shapes and records don't line up
+        #     w.field("ID_s",'N') # create (N)umerical attribute fields, integer
+        #     w.field("lat_s",'F',decimal=4) # float with 4 decimals
+        #     w.field("lon_s",'F',decimal=4) # float with 4 decimals
+            # preparing the m whcih is a couter for the shapefile arbitrary ID
+            # m = 0.00
+            # itterating to create the shapes of the result shapefile ignoring the first and last rows and columns
+            # for i in range(1, lat_lon_shape[0] - 1):
+            #     for j in range(1, lat_lon_shape[1] - 1):
+            #         # checking is lat and lon is located inside the provided bo
+            #         # empty the polygon variable
+            #         parts = []
+            #         # update records
+            #         m += 1 # ID
+            #         center_lat = lat[i,j] # lat value of data point in source .nc file
+            #         center_lon = lon[i,j] # lon value of data point in source .nc file should be within [0,360]
+            #         # Creating the lat of the shapefile
+            #         Lat_Up       = (lat[i - 1, j] + lat[i, j]) / 2
+            #         Lat_UpRright = (lat[i - 1, j] + lat[i - 1, j + 1] + lat[i, j + 1] + lat[i, j]) / 4
+            #         Lat_Right    = (lat[i, j + 1] + lat[i, j]) / 2
+            #         Lat_LowRight = (lat[i, j + 1] + lat[i + 1, j + 1] + lat[i + 1, j] + lat[i, j]) / 4
+            #         Lat_Low      = (lat[i + 1, j] + lat[i, j]) / 2
+            #         Lat_LowLeft  = (lat[i, j - 1] + lat[i + 1, j - 1] + lat[i + 1, j] + lat[i, j]) / 4
+            #         Lat_Left     = (lat[i, j - 1] + lat[i, j]) / 2
+            #         Lat_UpLeft   = (lat[i - 1, j - 1] + lat[i - 1, j] + lat[i, j - 1] + lat[i, j]) / 4
+            #         # Creating the lon of the shapefile
+            #         Lon_Up       = (lon[i - 1, j] + lon[i, j]) / 2
+            #         Lon_UpRright = (lon[i - 1, j] + lon[i - 1, j + 1] + lon[i, j + 1] + lon[i, j]) / 4
+            #         Lon_Right    = (lon[i, j + 1] + lon[i, j]) / 2
+            #         Lon_LowRight = (lon[i, j + 1] + lon[i + 1, j + 1] + lon[i + 1, j] + lon[i, j]) / 4
+            #         Lon_Low      = (lon[i + 1, j] + lon[i, j]) / 2
+            #         Lon_LowLeft  = (lon[i, j - 1] + lon[i + 1, j - 1] + lon[i + 1, j] + lon[i, j]) / 4
+            #         Lon_Left     = (lon[i, j - 1] + lon[i, j]) / 2
+            #         Lon_UpLeft   = (lon[i - 1, j - 1] + lon[i - 1, j] + lon[i, j - 1] + lon[i, j]) / 4
+            #         # creating the polygon given the lat and lon
+            #         parts.append([ (Lon_Up,        Lat_Up),\
+            #                        (Lon_UpRright,  Lat_UpRright), \
+            #                        (Lon_Right,     Lat_Right), \
+            #                        (Lon_LowRight,  Lat_LowRight), \
+            #                        (Lon_Low,       Lat_Low), \
+            #                        (Lon_LowLeft,   Lat_LowLeft), \
+            #                        (Lon_Left,      Lat_Left), \
+            #                        (Lon_UpLeft,    Lat_UpLeft), \
+            #                        (Lon_Up,        Lat_Up)])
+            #         # store polygon
+            #         w.poly(parts)
+            #         # update records/fields for the polygon
+            #         w.record(m, center_lat, center_lon)
 
     def add_lat_lon_source_SHP( self,
                                 shp,
@@ -1365,8 +1438,9 @@ to correct for lon above 180')
                             shp_2):
         import geopandas as gpd
         from   shapely.geometry import Polygon
-        import shapefile # pyshed library
-        import shapely
+        from numba import jit
+        # import shapefile # pyshed library
+        # import shapely
         """
         @ author:                  Shervan Gharari
         @ Github:                  https://github.com/ShervanGharari/EASYMORE
@@ -1389,6 +1463,15 @@ to correct for lon above 180')
         result: a geo data frame that includes the intersected shapefile and area, percent and normalized percent of each shape
         elements in another one
         """
+        @jit(nopython=True)
+        def normalize(ids: np.ndarray, unique_ids: np.ndarray,
+                         ap: np.ndarray) -> np.ndarray:
+            ap_new= ap.copy()
+            for i in unique_ids:
+                idx= np.where(ids==i)
+                ap_new[idx]= ap[idx]/ap[idx].sum()
+            return ap_new
+
         # get the column name of shp_1
         column_names = shp_1.columns
         column_names = list(column_names)
@@ -1425,18 +1508,22 @@ to correct for lon above 180')
         AP1 = np.array(result['AP1'])
         AP1N = AP1 # creating the nnormalized percent area
         ID_S1_unique = np.unique(ID_S1) #unique idea
-        for i in ID_S1_unique:
-            INDX = np.where(ID_S1==i) # getting the indeces
-            AP1N[INDX] = AP1[INDX] / AP1[INDX].sum() # normalizing for that sum
+        AP1N=normalize(ID_S1, ID_S1_unique, AP1)
+        #replace computationally expensive part with C++
+        # for i in ID_S1_unique:
+        #     INDX = np.where(ID_S1==i) # getting the indeces
+        #     AP1N[INDX] = AP1[INDX] / AP1[INDX].sum() # normalizing for that sum
         # taking the part of data frame as the numpy to incread the spead
         # finding the IDs from shapefile one
         ID_S2 = np.array (result['IDS2'])
         AP2 = np.array(result['AP2'])
         AP2N = AP2 # creating the nnormalized percent area
         ID_S2_unique = np.unique(ID_S2) #unique idea
-        for i in ID_S2_unique:
-            INDX = np.where(ID_S2==i) # getting the indeces
-            AP2N[INDX] = AP2[INDX] / AP2[INDX].sum() # normalizing for that sum
+        AP2N= normalize(ID_S2, ID_S2_unique, AP2)
+        # replace computationally expensive part with C++
+        # for i in ID_S2_unique:
+        #     INDX = np.where(ID_S2==i) # getting the indeces
+        #     AP2N[INDX] = AP2[INDX] / AP2[INDX].sum() # normalizing for that sum
         result ['AP1N'] = AP1N
         result ['AP2N'] = AP2N
         return result
@@ -1450,6 +1537,7 @@ to correct for lon above 180')
         from   shapely.geometry import Polygon
         import shapefile # pyshed library
         import shapely
+        from numba import jit
         """
         Perform spatial overlay between two polygons.
         Currently only supports data GeoDataFrames with polygons.
@@ -1474,6 +1562,14 @@ to correct for lon above 180')
             GeoDataFrame with new set of polygons and attributes
             resulting from the overlay
         """
+        @jit(nopython=True)
+        def bottleneck(pairs: dict) -> list:
+            nei= []
+            for i,j in pairs.items():
+                for k in j:
+                    nei.append([i ,k])
+            return nei
+
         df1 = df1.copy()
         df2 = df2.copy()
         df1['geometry'] = df1.geometry.buffer(0)
@@ -1488,10 +1584,10 @@ to correct for lon above 180')
             df1['bbox'] = df1.geometry.apply(lambda x: x.bounds)
             df1['sidx']=df1.bbox.apply(lambda x:list(spatial_index.intersection(x)))
             pairs = df1['sidx'].to_dict()
-            nei = []
-            for i,j in pairs.items():
-                for k in j:
-                    nei.append([i,k])
+            nei = bottleneck(pairs)
+            # for i,j in pairs.items():
+            #     for k in j:
+            #         nei.append([i,k])
             #pairs = gpd.GeoDataFrame(nei, columns=['idx1','idx2'], crs=df1.crs)
             pairs = gpd.GeoDataFrame(nei, columns=['idx1','idx2'])
             pairs = pairs.merge(df1, left_on='idx1', right_index=True)
